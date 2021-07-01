@@ -3,12 +3,31 @@ import numpy as np
 import time
 import gui
 
+# --------------------------------------------------------
+# MAIN CONFIGURATION OF BLENDED QUADCOPTER CONTROLLER
+
+# The angular PID controller tuning is the most interesting. e.g.
+# 'Angular_PID': {'P': [4000, 4000, 1500], 'I': [0, 0, 1.2], 'D': [1500, 1500, 0]},
+#  This corresponds to a:
+#  Roll PID config of [4000, 0, 1500] - first element of each list
+#  Pitch PID config of [4000, 0, 1500]- second element of each list
+#  Yaw   PID config of [1500, 1.2, 0]- third element of each list
+#  - similarly for PID position controllers, remaining parameters should stay fixed.
+
+#  Angular_PID index defines the first set of PID controllers to use - for example for nominal conditions
+#  Angular_PID2 index defines the fault PID configuration - can be tuned to any fault condition.
+#  ... for a larger set of controllers simply extend this set.
+
+#  IMPORTANT : For blended control to be effective there must be two DIFFERENTLY tuned controllers
+#  Position Blending is implemented but disabled as the SAME controller tuning is used.
+# --------------------------------------------------------
+
 BLENDED_CONTROLLER_PARAMETERS = {'Motor_limits': [0, 9000],
                          'Tilt_limits': [-10, 10],
                          'Yaw_Control_Limits': [-900, 900],
                          'Z_XY_offset': 500,
                          'Linear_PID': {'P': [300, 300, 7500], 'I': [0.04, 0.04, 5], 'D': [450, 450, 5400]},
-                         'Linear_PID2': {'P': [300, 300, 7000], 'I': [0.04, 0.04, 4.5], 'D': [450, 450, 5000]},
+                         'Linear_PID2': {'P': [300, 300, 7500], 'I': [0.04, 0.04, 5], 'D': [450, 450, 5400]},
                          'Linear_To_Angular_Scaler': [1, 1, 0],
                          'Yaw_Rate_Scaler': 0.18,
                          'Angular_PID': {'P': [24000, 24000, 1500], 'I': [0, 0, 1.2], 'D': [12000, 12000, 0]},
@@ -16,67 +35,37 @@ BLENDED_CONTROLLER_PARAMETERS = {'Motor_limits': [0, 9000],
                          }
 
 
-fault_mag = 0.15
-starttime = 300
+
+#number of runs of each environment.
 n = 1
-avgDomainPerf1 = {"None": [0], "Rotor": [0,0,0,0] , "Wind": [0,0,0,0] ,
-                 "PosNoise" : [0,0,0,0] , "AttNoise": [0,0,0,0]}
-
-allDomainPerf1 = {"None": [], "Rotor": [[],[],[],[]] , "Wind": [[],[],[],[]] ,
-                 "PosNoise" : [[],[],[],[]] , "AttNoise": [[],[],[],[]]}
-
-
 
 
 Type ="None"
 Level = 0
 
-
 controller1 = []
-
-controller2 = []
-
 steps1 = []
-steps2 = []
 total_steps = [ ]
 
 trajectories = []
-trajectories2 = []
-trajectories3 = []
-
-
 stepsToGoal = 0
-steps = 7
-limit = 7
-
-yaws = np.zeros(steps)
+steps = 0
+limit = 0
 goals = []
 safe_region = []
 
-def setRandomPath():
+def setDiamondPath():
     global stepsToGoal, steps, x_dest, y_dest, x_path, y_path, z_path, goals, safe_region, limit
-    millis = int(round(time.time()))
 
-    np.random.seed(millis)
-
-
-    limit = 10
-    x_dest = np.random.randint(-limit, limit)
-    y_dest = np.random.randint(-limit, limit)
-    z_dest = np.random.randint(5, limit)
-    steps = 4
-    x_path = [0, 0, x_dest, x_dest]
-    y_path = [0, 0, y_dest, y_dest]
-    z_path = [5, 5, z_dest, z_dest]
-
-    # ===================================================
-
-
+    x_path = [0, 0, 5, 0, -5, 0, 5, 5]
+    y_path = [0, 0, 0, 5, 0, -5, 0, 0]
+    z_path = [0, 5, 5, 5, 5, 5, 5, 5]
+    steps = len(x_path)
     interval_steps = 50
-    yaws = np.zeros(steps)
     goals = []
     safe_region = []
-    # print("Goal : " + str(x_dest) + " , " + str(y_dest))
+
+    #create line of points between all waypoints in the trajectory.
     for i in range(steps):
         if (i < steps - 1):
             # create linespace between waypoint i and i+1
@@ -91,17 +80,37 @@ def setRandomPath():
         goals.append([x_path[i], y_path[i], z_path[i]])
         # for each pos in linespace append a goal
         safe_region.append([])
+
+        #defines the centre of the spheres used for safe zone calculation
         for j in range(interval_steps):
             safe_region[i].append([x_lin[j], y_lin[j], z_lin[j]])
             stepsToGoal += 1
-        #print(goals)
+
+
+#=======================================
+#====      MAIN SIMULATION LOOP     ====
+#=======================================
+
+
+# Set the fault condition of interest - if no fault mode needed use "" instead.
+# Several fault modes can be set together using a list of strings.
 
 #for DType in ["Rotor", "Wind", "PosNoise", "AttNoise"]:
 for DType in ["Rotor"]:
 
+
     # for mag in [1,2,3,4]:
         mag = 1
-        control = "Dirichlet"
+
+
+
+
+        #control = "C1" # use the first controller only
+        #control = "C2"  # use the second controller only
+        control = "Uniform" # use uniform randomized blended control between 2 controllers
+        #control = "Dirichlet"  # randomized blended control between N controllers using dirichlet dist
+        #control = "Agent"  # let a RL agent parameterize the distribution to use
+
         for i in range(n):
             quad_id = i
 
@@ -124,7 +133,7 @@ for DType in ["Rotor"]:
 
             gui_object = gui.GUI(quads=Quads, ctrl=ctrl)
 
-            setRandomPath()
+            setDiamondPath()
             current = 0
             ctrl.update_target(goals[current], safe_region[current])
 
@@ -143,7 +152,7 @@ for DType in ["Rotor"]:
                 # rotor = 1
                 Level = magnitude
                 fault_mag = magnitude * 0.05
-                starttime =300
+                starttime = 300
                 endtime = 31000
                 faultType = "Rotor"
                 faults[rotor] = fault_mag
@@ -205,26 +214,42 @@ for DType in ["Rotor"]:
             cumu_reward = 0
             obs = ctrl.get_updated_observations()
 
-
-
+            #-----------------------------------------------------
+            #this while loop actually steps through the simulation.
+            # -----------------------------------------------------
             while not done:
-                print(stepcount)
+                #print(stepcount)
                 stepcount += 1
 
+                # -----------------------------------------------------
+                # this line steps the controller object which in turn
+                # steps the quadcopter object. The obs vector contains
+                # the current state of the quadcopter.
                 obs = ctrl.step()
-                rew = ctrl.getReward()
-
+                # -----------------------------------------------------
+                #
+                
                 if (stepcount % 20 == 0):
                     gui_object.quads[str(quad_id)]['position'] = [obs[0], obs[1], obs[2]]
                     gui_object.update()
 
 
 
+                # -----------------------------------------------------
+                rew = ctrl.getReward()
+                # Below code is relevant for showing the GUI and checking
+                # if the last waypoint has been reached (sim run ends).
+
+                # a reward of -0.1 is used to halt the simulation from
+                # the controller file based on some criteria such as too many steps
+                # outside of the safe zone.
+                #
+                # NOTE: this can be useful even without training.
                 if (rew != -0.1):
                     cumu_reward += rew
                 else:
+                    # Quadcopter failed - end of run.
                     done = True
-
                     failed = True
 
                 if (ctrl.isAtPos(goals[current])):
@@ -234,6 +259,9 @@ for DType in ["Rotor"]:
                     else:
                         current += 0
 
+                    # -----------------------------------------------------
+                    # Check if the another waypoint exists on the trajectory
+                    # if so update the next goal otherwise stabilize on the goal and end.
                     if (current < steps - 1):
                         ctrl.update_target(goals[current], safe_region[current - 1])
                         if (current < steps - 1):
@@ -243,7 +271,7 @@ for DType in ["Rotor"]:
 
                         stableAtGoal += 1
                         if (stableAtGoal > 100):
-
+                            #Goal position has been reached - end of run.
                             done = True
                         else:
 

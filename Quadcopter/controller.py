@@ -96,6 +96,8 @@ class Blended_PID_Controller():
         self.sigma = 0.1
         self.blendDist = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu, scale=self.sigma)
 
+        self.rollBlend = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu, scale=self.sigma)
+        self.pitchBlend = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu, scale=self.sigma)
 
         self.PosblendDist = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu,
                                          scale=self.sigma)
@@ -110,13 +112,34 @@ class Blended_PID_Controller():
         self.min_distances_points= []
         self.min_distances = []
 
-    def wrap_angle(self,val):
-        return( ( val + np.pi) % (2 * np.pi ) - np.pi )
 
-    def setFaultTime(self,low,high):
-        self.startfault = low
-        self.endfault = high
-        self.fault_time = [self.startfault, self.endfault]
+
+    #====================BLENDING FUNCTION=============================================
+    # Helper functions to work with different blending architectures.
+    # Used to sample new weights at each iteration from the currently
+    # defined distribution ( self.blendDist - gaussian dist defined using mean and std.)
+
+    def setRollDist(self, params):
+        lower, upper = 0, 1
+        self.mu = params[0]
+        self.sigma = params[1]
+        self.rollBlend = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu,
+                                         scale=self.sigma)
+
+    def getRollBlend(self):
+        return self.rollBlend.rvs(size=1)
+
+
+    def setPitchDist(self, params):
+        lower, upper = 0, 1
+        self.mu = params[0]
+        self.sigma = params[1]
+        self.pitchBlend = stats.truncnorm((lower - self.mu) / self.sigma, (upper - self.mu) / self.sigma, loc=self.mu,
+                                         scale=self.sigma)
+
+    def getPitchBlend(self):
+        return self.pitchBlend.rvs(size=1)
+
 
     def setBlendWeight(self, new_weight):
         self.current_blend = new_weight
@@ -145,7 +168,7 @@ class Blended_PID_Controller():
         self.current_blend = self.blendDist.rvs(size=3)
 
     def nextPosBlendWeight(self):
-        self.current__pos_blend = self.PosblendDist.rvs(size=3)
+        self.current_pos_blend = self.PosblendDist.rvs(size=3)
         #self.current_blend = np.random.uniform(0,1,3)
         #print("Blends from dist: " + str(self.current_blend))
 
@@ -155,40 +178,21 @@ class Blended_PID_Controller():
     def getPosBlendWeight(self):
         return self.current_pos_blend
 
-
     def getBlends(self):
         return self.blends
 
-    def setMotorCommands(self , cmds):
-        self.MotorCommands = cmds
-    def getMotorCommands(self):
-        m1 = self.MotorCommands[0]
-        m2 = self.MotorCommands[1]
-        m3 = self.MotorCommands[2]
-        m4 = self.MotorCommands[3]
-
-        return m1, m2, m3, m4
-    def setFaultMode(self, mode):
-        self.FaultMode = mode
-        #if(mode=="Rotor"):
-          #  print("Rotor Faults active")
-            #fault = [0,0,0,0]
-            #self.setMotorFault(fault)
-        #if(mode=="Wind"):
-           # print("Wind Faults active")
-            #winds = [0,0,0]
-            #self.setNormalWind(winds)
-        #if(mode=="PosNoise"):
-          #  print("Position Noise active")
-            #noise = 0
-            #self.setSensorNoise(noise)
-        #if(mode=="AttNoise"):
-            #print("Attitude Noise active")
-            #attNoise = 0
-            #self.setAttitudeSensorNoise(attNoise)
-
-
-
+    # ==================== UPDATE FUNCTION =============================================
+    # The main functions that step the simulation forward and set the commands for the
+    # quadcopter. Can be roughly broken down as follows:
+    #
+    # Step 1: get current state update of quadcopter
+    # Step 2: Add noise to the state if noise is enabled as faultmode
+    # Step 3: get Position error and use Linear PID to get the attitude reference
+    # Step 4: use those to calculate the attitude error
+    # Step 5: Get the suggested actions from all of the attitude PID controllers configured.
+    # Step 6: Depending on the high-level control architecture selected - get a blending weight
+    # Step 7: Calculate the four motor commands based on weighted actions of all controllers.
+    # Step 8: Apply those to the quadcopter and get new observation of quadcopter states.
     def update(self):
         self.total_steps += 1
 
@@ -196,8 +200,6 @@ class Blended_PID_Controller():
 
         [dest_x,dest_y,dest_z] = self.target
         [x,y,z,x_dot,y_dot,z_dot,theta,phi,gamma,theta_dot,phi_dot,gamma_dot] = self.get_state(self.quad_identifier)
-
-
 
         self.x_noise = np.random.uniform(-self.noiseMag, self.noiseMag)
         self.y_noise = np.random.uniform(-self.noiseMag, self.noiseMag)
@@ -236,31 +238,37 @@ class Blended_PID_Controller():
         dest_x_dot = self.LINEAR_P[0]*(x_error) + self.LINEAR_D[0]*(-x_dot) + self.xi_term
         dest_y_dot = self.LINEAR_P[1]*(y_error) + self.LINEAR_D[1]*(-y_dot) + self.yi_term
         dest_z_dot = self.LINEAR_P[2]*(z_error) + self.LINEAR_D[2]*(-z_dot) + self.zi_term
-        dest_z_dot2 = self.LINEAR_P2[2]*(z_error) + self.LINEAR_D2[2]*(-z_dot) + self.zi_term2
 
-        if (self.controller == "Uniform"):
-            blend_weight = self.getUniformBlend()
-            uniBlendedDest_z_dot = dest_z_dot2 * blend_weight[0] + dest_z_dot * (1 - blend_weight[0])
-            throttle = np.clip(uniBlendedDest_z_dot, self.Z_LIMITS[0], self.Z_LIMITS[1])
+        ####### POSITION BLENDING FUNCTIONALITY - should be extended to X Y values if needed ###########
 
-        elif(self.controller == "C2"):
+        #dest_z_dot2 = self.LINEAR_P2[2]*(z_error) + self.LINEAR_D2[2]*(-z_dot) + self.zi_term2
+        #
+        # if (self.controller == "Uniform"):
+        #     blend_weight = self.getUniformBlend()
+        #     uniBlendedDest_z_dot = dest_z_dot2 * blend_weight[0] + dest_z_dot * (1 - blend_weight[0])
+        #     throttle = np.clip(uniBlendedDest_z_dot, self.Z_LIMITS[0], self.Z_LIMITS[1])
+        #
+        # elif(self.controller == "C2"):
+        #
+        #     throttle = np.clip(dest_z_dot2, self.Z_LIMITS[0], self.Z_LIMITS[1])
+        #
+        # elif(self.controller == "Agent"):
+        #     self.nextPosBlendWeight()
+        #     Pos_blend_weight = self.getPosBlendWeight()
+        #     agentBlendedDest_z_dot =  dest_z_dot2 * Pos_blend_weight[0] + dest_z_dot * (1 - Pos_blend_weight[0])
+        #
+        #     throttle = np.clip(agentBlendedDest_z_dot,self.Z_LIMITS[0],self.Z_LIMITS[1])
+        #
+        # elif(self.controller == "Dirichlet"):
+        #     blend_weight = np.random.dirichlet((3,3), 1).transpose()
+        #     DiriBlendedDest_z_dot = dest_z_dot2 * blend_weight[0] + dest_z_dot * (blend_weight[1])
+        #     throttle = np.clip(DiriBlendedDest_z_dot, self.Z_LIMITS[0], self.Z_LIMITS[1])
+        #
+        # else:
+        #     throttle = np.clip(dest_z_dot,self.Z_LIMITS[0],self.Z_LIMITS[1])
 
-            throttle = np.clip(dest_z_dot2, self.Z_LIMITS[0], self.Z_LIMITS[1])
-
-        elif(self.controller == "Agent"):
-            self.nextPosBlendWeight()
-            Pos_blend_weight = self.getPosBlendWeight()
-            agentBlendedDest_z_dot =  dest_z_dot2 * Pos_blend_weight[0] + dest_z_dot * (1 - Pos_blend_weight[0])
-
-            throttle = np.clip(agentBlendedDest_z_dot,self.Z_LIMITS[0],self.Z_LIMITS[1])
-
-        elif(self.controller == "Dirichlet"):
-            blend_weight = np.random.dirichlet((3,3), 1).transpose()
-            DiriBlendedDest_z_dot = dest_z_dot2 * blend_weight[0] + dest_z_dot * (blend_weight[1])
-            throttle = np.clip(DiriBlendedDest_z_dot, self.Z_LIMITS[0], self.Z_LIMITS[1])
-
-        else:
-            throttle = np.clip(dest_z_dot,self.Z_LIMITS[0],self.Z_LIMITS[1])
+        # Position blending disabled
+        throttle = np.clip(dest_z_dot, self.Z_LIMITS[0], self.Z_LIMITS[1])
 
 
         dest_theta = self.LINEAR_TO_ANGULAR_SCALER[0]*(dest_x_dot*math.sin(gamma)-dest_y_dot*math.cos(gamma))
@@ -278,7 +286,9 @@ class Blended_PID_Controller():
         self.trackingErrors["Pos_err"] += (abs(round(x_error, 2)) + abs(round(y_error, 2)) + abs(round(z_error, 2)))
         self.trackingErrors["Att_err"] += (abs(round(phi_error,2)) + abs(round(theta_error,2)) + abs(round(dest_gamma-gamma, 2)))
 
-
+        #-----------------------------------------------------------------------
+        #  GET DIFFERENT CONTROL ARCHITECTURE OUTPUTS - only apply the selected
+        #-----------------------------------------------------------------------
         #Controller 1
         self.thetai_term += self.ANGULAR_I[0]*theta_error
         self.phii_term += self.ANGULAR_I[1]*phi_error
@@ -313,9 +323,17 @@ class Blended_PID_Controller():
 
         # blended controller
         elif(self.controller == "Uniform"):
-            blend_weight = self.getUniformBlend()
+            # USE THE SAME DISTRIBUTION FOR ROLL AND PITCH
+            #blend_weight = self.getUniformBlend()
 
-            #blend_weight = self.getBlendWeight()
+            # USE THE DIFFERENT DISTRIBUTION FOR ROLL AND PITCH
+            roll_blend_weight = self.getRollBlend()
+            pitch_blend_weight = self.getPitchBlend()
+            blend_weight = [roll_blend_weight[0], pitch_blend_weight[0], 0]
+
+            print("Uniform Roll Blending weight:" + str(roll_blend_weight[0]))
+            print("Uniform Pitch Blending weight:" + str(pitch_blend_weight[0]))
+
             x_val_blend = x_val2 * blend_weight[0] + x_val * (1 - blend_weight[0])
             y_val_blend = y_val2 * blend_weight[1] + y_val * (1 - blend_weight[1])
             z_val_blend = z_val2 * blend_weight[2] + z_val * (1 - blend_weight[2])
@@ -327,6 +345,7 @@ class Blended_PID_Controller():
 
 
         elif (self.controller == "Dirichlet"):
+            # NOTE FIXED DISTRIBUTION USED!
             blend_weight = np.random.dirichlet((3, 3), 3)
 
 
@@ -401,92 +420,9 @@ class Blended_PID_Controller():
         #update the current observations and return
         return new_obs
 
-
-    def rotation_matrix(self,angles):
-        ct = math.cos(angles[0])
-        cp = math.cos(angles[1])
-        cg = math.cos(angles[2])
-        st = math.sin(angles[0])
-        sp = math.sin(angles[1])
-        sg = math.sin(angles[2])
-        R_x = np.array([[1,0,0],[0,ct,-st],[0,st,ct]])
-        R_y = np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]])
-        R_z = np.array([[cg,-sg,0],[sg,cg,0],[0,0,1]])
-        R = np.dot(R_z, np.dot( R_y, R_x ))
-        return R
-
-
-
-    def update_target(self,target,new_safety_bound):
-        self.current_waypoint +=1
-        self.target = target
-        self.safe_bound = new_safety_bound
-        self.time_outside_safety = 0
-        self.current_distance_to_opt = self.getDistanceToOpt()
-
-    def getCurrentSafeBounds(self):
-        return self.safe_bound
-
-    def getTotalTimeOutside(self):
-        return self.total_time_outside_safety
-
-    def getLatestMinDistPoint(self):
-        return self.min_distances_points[-1]
-
-    def getLatestMinDist(self):
-        return self.min_distances[-1]
-    def update_yaw_target(self,target):
-        self.yaw_target = self.wrap_angle(target)
-
-    def getTrackingErrors(self):
-        err_array = []
-        print(self.trackingErrors)
-        for key, value in self.trackingErrors.items():
-            err_array.append((value/self.total_steps))
-        return err_array
-
-    def get_updated_observations(self):
-        #update the current observation after taking an action and progressing the quad state
-        #[dest_x, dest_y, dest_z] = self.target
-        [x, y, z, x_dot, y_dot, z_dot, theta, phi, gamma, theta_dot, phi_dot, gamma_dot] = self.get_state(
-            self.quad_identifier)
-
-
-        #change the states observed by the agent
-        [dest_x, dest_y, dest_z] = self.target
-        #obs = [x, y, z, theta, phi, gamma, theta_dot, phi_dot, gamma_dot, x, dest_y, dest_z dest_]
-
-        obs = [x, y, z, theta, phi, gamma,  dest_x, dest_y, dest_z ]
-
-        return obs
-
-    def set_action(self,action):
-        #change the action effect of the agent
-        #print("C Action: " + str(action))
-
-        positionBlend = [action[0], action[1]]
-        self.setBlendDist(positionBlend)
-        attitudeBlend = [action[2], action[3]]
-        self.setBlendDist(attitudeBlend)
-
-        # roll = action[0]
-        # pitch = action[1]
-        # actionb = [roll , pitch , 0]
-        # self.setBlendWeight(actionb)
-
-        #self.setMotorCommands(action)
-        #self.updateAngularPID(action)
-        #self.total_steps += 1
-        obs = self.update()
-        # obs_array = []
-        # for key, value in obs.items():
-        #     obs_array.append(value)
-        # return obs_array
-        return obs
-
     def step(self):
         obs = self.update()
-        #print(obs)
+        # Filter out states that are not interesting
         # obs_array = []
         # for key, value in obs.items():
         #     obs_array.append(value)
@@ -494,6 +430,26 @@ class Blended_PID_Controller():
         return obs
 
 
+
+    #========MAIN LEARNING FUNCTIONALITY================
+    # gives the agent a way to influence the main control
+    # loop by changing the Blending Distribution to use
+
+    def set_action(self, action):
+        # [Roll Mean , Roll Std, Pitch Mean, Pitch Std]
+
+        RollBlend = [action[0], action[1]]
+        PitchBlend = [action[2], action[3]]
+        self.setRollDist(RollBlend)
+        self.setPitchDist(PitchBlend)
+
+        # Steps simulation forward
+        obs = self.update()
+        return obs
+
+    # ===========OTHER LEARNING HELPER FUNCTIONS ===============
+    # Configures when a simulation is considered a fail
+    # due to too much time outside of the safebound.
     def isAtPos(self,pos):
         [dest_x, dest_y, dest_z] = pos
         [x, y, z, x_dot, y_dot, z_dot, theta, phi, gamma, theta_dot, phi_dot, gamma_dot] = self.get_state(
@@ -517,7 +473,6 @@ class Blended_PID_Controller():
             return False
         else:
             return True
-
 
     def getDistanceToOpt(self):
 
@@ -564,7 +519,6 @@ class Blended_PID_Controller():
 
         return
 
-
     def getReward(self):
         end_threshold = 2000
         if (self.outsideBounds):
@@ -587,6 +541,88 @@ class Blended_PID_Controller():
         #     reward = -1000
 
         return reward
+
+    # ===========OTHER SIMUALTION FUNCTIONS BELOW ===============
+
+    def wrap_angle(self,val):
+        return( ( val + np.pi) % (2 * np.pi ) - np.pi )
+
+    def setFaultTime(self,low,high):
+        self.startfault = low
+        self.endfault = high
+        self.fault_time = [self.startfault, self.endfault]
+
+    def setMotorCommands(self , cmds):
+        self.MotorCommands = cmds
+    def getMotorCommands(self):
+        m1 = self.MotorCommands[0]
+        m2 = self.MotorCommands[1]
+        m3 = self.MotorCommands[2]
+        m4 = self.MotorCommands[3]
+
+        return m1, m2, m3, m4
+    def setFaultMode(self, mode):
+        self.FaultMode = mode
+
+    def rotation_matrix(self,angles):
+        ct = math.cos(angles[0])
+        cp = math.cos(angles[1])
+        cg = math.cos(angles[2])
+        st = math.sin(angles[0])
+        sp = math.sin(angles[1])
+        sg = math.sin(angles[2])
+        R_x = np.array([[1,0,0],[0,ct,-st],[0,st,ct]])
+        R_y = np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]])
+        R_z = np.array([[cg,-sg,0],[sg,cg,0],[0,0,1]])
+        R = np.dot(R_z, np.dot( R_y, R_x ))
+        return R
+
+    def update_target(self,target,new_safety_bound):
+        self.current_waypoint +=1
+        self.target = target
+        self.safe_bound = new_safety_bound
+        self.time_outside_safety = 0
+        self.current_distance_to_opt = self.getDistanceToOpt()
+
+    def getCurrentSafeBounds(self):
+        return self.safe_bound
+
+    def getTotalTimeOutside(self):
+        return self.total_time_outside_safety
+
+    def getLatestMinDistPoint(self):
+        return self.min_distances_points[-1]
+
+    def getLatestMinDist(self):
+        return self.min_distances[-1]
+
+    def update_yaw_target(self,target):
+        self.yaw_target = self.wrap_angle(target)
+
+    def getTrackingErrors(self):
+        err_array = []
+        print(self.trackingErrors)
+        for key, value in self.trackingErrors.items():
+            err_array.append((value/self.total_steps))
+        return err_array
+
+    def get_updated_observations(self):
+        #update the current observation after taking an action and progressing the quad state
+        #[dest_x, dest_y, dest_z] = self.target
+        [x, y, z, x_dot, y_dot, z_dot, theta, phi, gamma, theta_dot, phi_dot, gamma_dot] = self.get_state(
+            self.quad_identifier)
+
+
+        #change the states observed by the agent
+        [dest_x, dest_y, dest_z] = self.target
+        #obs = [x, y, z, theta, phi, gamma, theta_dot, phi_dot, gamma_dot, x, dest_y, dest_z dest_]
+
+        obs = [x, y, z, theta, phi, gamma,  dest_x, dest_y, dest_z ]
+
+        return obs
+
+
+
 
     def thread_run(self,update_rate,time_scaling):
         update_rate = update_rate*time_scaling
